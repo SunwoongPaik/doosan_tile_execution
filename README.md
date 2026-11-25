@@ -1,126 +1,111 @@
-# Doosan H2017 Ceiling Tile Removal - Real Hardware Execution System
+# Doosan H2017 Ceiling Tile Removal — ROS 2 Jazzy Execution Suite
 
-Autonomous ceiling tile extraction trajectory execution and real-time 3D digital twin monitoring system for the **Doosan H2017** collaborative robot.
+Native **ROS 2 Jazzy** real-robot execution framework for automated ceiling tile removal on the **Doosan H2017** manipulator (no ROS 1, no Docker, no `ros1_bridge`).
 
----
-
-## 1. System Architecture & Verified Setup
-
-- **Hardware**: Doosan Robotics H2017 Cobot (CS-01 Controller), Custom 4-leg End-Effector, 4×4 Ceiling Tile Testbed.
-- **Control Workstation**: Windows 11 + WSL2 (Ubuntu 24.04), `networkingMode=mirrored`.
-- **Network IPs**:
-  - Robot Controller: `192.168.7.3:12345` (Subnet: `255.255.0.0`, Gateway: `192.168.7.100`)
-  - Workstation (PC / WSL2): `192.168.7.100`
-- **Docker Environment**: Native WSL2 Docker Engine (`--net=host` mode prevents Docker Desktop NAT isolation and resolves `[1.3004] Client T/P authentication failed`).
-- **Optimal Trajectory**: 659-waypoint optimal non-contact extraction motion (`trajectories/optimal_tile_removal_30.69deg.csv`, max tilt 30.698°).
-
-```text
- ┌────────────────────────┐         TCP/IP (12345)        ┌────────────────────────┐
- │   Doosan CS-01 Box     │ ◄───────────────────────────► │  Native Docker on WSL2 │
- │     (192.168.7.3)      │   DRFL Auth (192.168.7.100)   │    (Host Network)      │
- └────────────────────────┘                               └───────────┬────────────┘
-             ▲                                                        │
-             │ Real-time Telemetry (50Hz)                             │
-             └────────────────────────────────────────────────────────┘
-                                      │
-                         ┌────────────▼───────────┐
-                         │  RViz 3D Digital Twin  │
-                         │    (/joint_states)     │
-                         └────────────────────────┘
-```
+Designed as an extensible repository to host multiple execution modes (saved-trajectory replay, live MoveIt 2 planning integration, and future RealSense RGB-D perception pipelines).
 
 ---
 
-## 2. Directory Structure
+## Repository Structure
 
 ```text
 doosan_tile_execution/
-├── README.md                   # Complete documentation & user guide
-├── tile_commander.py           # Master Execution Commander (English CLI, 50Hz digital twin)
-├── scripts/
-│   ├── run_driver.sh           # Terminal 1: Starts native Docker robot driver container
-│   ├── run_commander.sh        # Terminal 2: Launches the interactive CLI Commander
-│   └── run_rviz.sh             # Terminal 3: Launches 3D live Digital Twin viewer in RViz
-└── trajectories/
-    └── optimal_tile_removal_30.69deg.csv  # 659 verified joint trajectory waypoints
+├── ros2/                                      # [PRIMARY] Native ROS 2 Jazzy Execution Suite
+│   ├── commanders/
+│   │   └── tile_commander_ros2.py             # Mode 1: Interactive Saved-Trajectory Action Commander
+│   ├── scripts/
+│   │   ├── run_driver_ros2.sh                 # Terminal 1: Native H2017 Driver + MoveIt2 + RViz2
+│   │   └── run_commander_ros2.sh              # Terminal 2: Launch Interactive Action Commander
+│   └── patches/
+│       └── dsr_hw_interface2_idle_fix.patch   # Upstream 0x8611 idle-debounce fix for doosan-robot2
+├── trajectories/
+│   └── optimal_tile_removal_30.69deg.csv      # Verified 659-waypoint tile extraction path (30.69 deg)
+└── legacy_ros1/                               # [BACKUP] Legacy ROS 1 + Docker service-based scripts
+    ├── tile_commander.py
+    └── scripts/
 ```
 
 ---
 
-## 3. Quick Start Guide (3-Terminal Workflow)
+## Key Architecture Highlights
 
-### Terminal 1: Launch Robot Driver
-Starts the ROS Noetic driver stack connected to the physical robot (`192.168.7.3`):
-```bash
-cd ~/ros2_ws/doosan_tile_execution
-./scripts/run_driver.sh
-```
-> **Check**: The Teach Pendant will display `Transfer completed`. This indicates control authority has been transferred to the PC. Leave this terminal open.
+1. **Pure ROS 2 Jazzy Single Environment (No Bridge)**
+   - Uses official [`DoosanRobotics/doosan-robot2`](https://github.com/DoosanRobotics/doosan-robot2) (`jazzy` branch) directly on Ubuntu 24.04 (WSL2 mirrored networking or native Linux).
+   - Connects directly to the H2017 controller (`192.168.7.3:12345` + 100 Hz real-time stream on port `12347`).
+   - Uses **CycloneDDS (`rmw_cyclonedds_cpp`)** to eliminate WSL2 FastDDS discovery/large-topic stalls.
+   - Verified on H2017 controller firmware `GV02100300` (v2.10.3).
 
----
+2. **Standard `FollowJointTrajectory` Action (Positions + Velocities + Timing)**
+   - Sends all **659 waypoints** (joint positions, smooth velocities, and strictly monotonic `time_from_start`) in **one single `FollowJointTrajectory` Action Goal** to `/dsr_moveit_controller/follow_joint_trajectory`.
+   - Automatically measures and reports **Planned Duration vs. Actual Execution Duration** and **Max Joint Tracking Error** via Action Feedback.
 
-### Terminal 2: Run Master Commander
-Launches the menu-driven master controller:
-```bash
-cd ~/ros2_ws/doosan_tile_execution
-./scripts/run_commander.sh
-```
-
-**Commander Menu Overview**:
-- **`1: [Approach Start Pose]`**: Slowly (10.0s) moves the robot from home to the ceiling tile extraction starting pose (`WP 0`).
-- **`2: [Step-by-Step Replay]`**: Executes the 30.69° tile removal across 4 checkpoints with pauses (`[y]` prompt before each stage):
-  - *Stage 1 (0% -> 25%)*: Vertical lift & initial rotation.
-  - *Stage 2 (25% -> 50%)*: Optimal 30.69° tilt entry.
-  - *Stage 3 (50% -> 75%)*: Grid clearance passage & downward extraction.
-  - *Stage 4 (75% -> 100%)*: Complete separation & final clearance.
-- **`3: [Continuous Replay]`**: Smoothly executes the full removal motion in ~20.0s (responsive, safe 25 deg/s speed).
-- **`4: [Return to Home]`**: Moves the arm to a safe parking position before turning off the robot:
-  - *Option 1 (Standard Safe Park)*: `[-90°, 0°, 90°, 0°, 90°, 0°]` (Minimizes torque on motor gearboxes).
-  - *Option 2 (Original Lab Standby)*: `[-90°, 20°, -140°, 0°, 115°, -25°]`.
-- **`5: [Inspect Pose]`**: Displays live joint angles (deg/rad) and Cartesian Flange/TCP coordinates (X, Y, Z, Roll, Pitch, Yaw).
+3. **Driver Patch (`dsr_hw_interface2_idle_fix.patch`)**
+   - Fixes a 1-tick idle transition bug in `dsr_hardware2/src/dsr_hw_interface2.cpp` where slowing down near the end of a smooth trajectory (`sum(|dq|) < 0.0001 rad`) flipped `idle_ = true` and re-invoked blocking `set_safety_mode()` (~22 ms stall), triggering EtherCAT Following Error `0x8611` → `SAFE_STOP (7073)`.
+   - Debounces `idle_` by 50 ticks (0.5 s of complete stillness) and keeps streaming `servoj_rt` cleanly until settled.
 
 ---
 
-### Terminal 3 (Optional): 3D Digital Twin in RViz
-Opens the 3D RViz GUI window:
+## Prerequisites & Driver Setup
+
 ```bash
-cd ~/ros2_ws/doosan_tile_execution
-./scripts/run_rviz.sh
+# 1. Install dependencies (Ubuntu 24.04 + ROS 2 Jazzy)
+sudo apt-get update
+sudo apt-get install -y libpoco-dev ros-jazzy-rmw-cyclonedds-cpp
+
+# 2. Clone official Doosan ROS 2 Jazzy driver into an isolated workspace
+mkdir -p ~/ros2_ws/doosan_ros2_ws/src
+cd ~/ros2_ws/doosan_ros2_ws/src
+git clone -b jazzy --depth 1 https://github.com/DoosanRobotics/doosan-robot2.git
+
+# 3. Apply the 0x8611 idle-debounce patch
+cd doosan-robot2
+git apply /home/sun/ros2_ws/doosan_tile_execution/ros2/patches/dsr_hw_interface2_idle_fix.patch
+
+# 4. Build required H2017 packages (2.x controller default build)
+cd ~/ros2_ws/doosan_ros2_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --base-paths src --packages-up-to \
+    dsr_hardware2 dsr_controller2 dsr_bringup2 dsr_description2 dsr_moveit_config_h2017
 ```
-> **Digital Twin**: `tile_commander.py` broadcasts live encoder states at **50Hz** to `/joint_states`. As the real robot moves in the lab, the 3D robot model in RViz mirrors its motion simultaneously in real time.
 
 ---
 
-## 4. Safety & Emergency Stop
+## Quick Start (Real H2017 Robot)
 
-1. **Hardware E-Stop (Highest Priority)**:
-   - Hold the Teach Pendant with your thumb positioned over the red mushroom **Emergency Stop (E-Stop)** button. Press immediately if any unexpected motion or obstacle collision is imminent.
-2. **Software Cancel**:
-   - Press **`Ctrl + C`** in Terminal 2 to cancel active trajectory goals.
+> **SAFETY**: Always operate with a teammate present and the physical red **E-Stop** button on the Teach Pendant in hand. Never rely on `Ctrl+C` as an emergency stop.
+
+### Terminal 1 — Launch Native ROS 2 Driver + MoveIt2 + RViz2
+```bash
+./ros2/scripts/run_driver_ros2.sh 192.168.7.3
+```
+
+### Terminal 2 — Launch Interactive Action Commander (Mode 1)
+```bash
+./ros2/scripts/run_commander_ros2.sh
+```
+*(Optional: specify `--duration 30` or `--csv /path/to/joints.csv`, or `--dry-run` to validate offline without a robot.)*
+
+#### Commander Menu
+- `0`: **Safety Micro-Jog** — Move a single joint (default `J1 +5.0°`) via Action for initial hardware verification
+- `1`: **Approach Start Pose** — Smooth minimum-jerk S-curve Action trajectory to WP 0
+- `2`: **Step-by-Step Replay** — Execute the 4 extraction stages with dense Action trajectories and pause confirmation
+- `3`: **Continuous Replay** — Execute all **659 waypoints** in **one single `FollowJointTrajectory` Action Goal**
+- `4`: **Return to Home** — Move safely to Standard Safe Park (`-90, 0, 90, 0, 90, 0`) or Lab Standby (`-90, 20, -140, 0, 115, -25`)
+- `5`: **Inspect Pose** — Live `/joint_states` readout
 
 ---
 
-## 5. Connecting with GitHub
+## Verified Real-Robot Benchmark Results (H2017, `GV02100300`)
 
-To push this package to GitHub as a standalone repository or add it to an existing lab repository:
+| Test Case | Waypoints | Planned Time | Actual Time | Time Error | Max Tracking Error | Result |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| Safety Micro-Jog (`J6 +2.0°`) | 51 | `3.000 s` | `3.001 s` | `+0.001 s (+0.03%)` | `0.250 deg` | `SUCCESS` (0 alarms) |
+| Approach Start Pose (WP 0) | 51 | `32.396 s` | `32.410 s` | `+0.014 s (+0.04%)` | `2.991 deg` | `SUCCESS` (0 alarms) |
+| **Full Continuous Extraction (1-Shot)** | **659** | **`20.000 s`** | **`20.309 s`** | **`+0.309 s (+1.54%)`** | **`2.946 deg`** | **`SUCCESS` (0 alarms)** |
 
-### Option A: Create a New Standalone GitHub Repository
-```bash
-cd ~/ros2_ws/doosan_tile_execution
-git init
-git add .
-git commit -m "feat: Add Doosan H2017 real robot tile execution system & digital twin"
-git branch -M main
-git remote add origin https://github.com/<YOUR_GITHUB_USERNAME>/doosan_tile_execution.git
-git push -u origin main
-```
+---
 
-### Option B: Add to Existing `doosan_docker` Repository
-```bash
-cd ~/ros2_ws
-cp -r doosan_tile_execution doosan_docker/
-cd doosan_docker
-git add doosan_tile_execution
-git commit -m "feat: integrate ceiling tile execution commander & digital twin scripts"
-git push origin main
-```
+## Roadmap (Upcoming Modes)
+- [ ] Custom 4-leg End-Effector (`Assembly_cut.stl`) + Vention lift URDF integration into `dsr_moveit_config_h2017`
+- [ ] Direct integration with online tile motion planner (`plan_one_tile.py`)
+- [ ] RealSense RGB-D camera perception & tile pose estimation pipeline

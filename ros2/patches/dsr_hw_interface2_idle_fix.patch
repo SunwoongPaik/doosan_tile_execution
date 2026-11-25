@@ -1,0 +1,24 @@
+diff --git a/dsr_hardware2/src/dsr_hw_interface2.cpp b/dsr_hardware2/src/dsr_hw_interface2.cpp
+index 4867bd4..095339b 100755
+--- a/dsr_hardware2/src/dsr_hw_interface2.cpp
++++ b/dsr_hardware2/src/dsr_hw_interface2.cpp
+@@ -678,7 +678,18 @@ return_type DRHWInterface::write(const rclcpp::Time &, const rclcpp::Duration &d
+     // Accumulate simulated time
+     total_time_sec_ += effective_dt;
+ 
+-    if (positionCommandRunning(pre_joint_position_command_, joint_position_command_))
++    static int idle_tick_count = 100;
++    const bool cmd_running = positionCommandRunning(pre_joint_position_command_, joint_position_command_);
++    if (cmd_running)
++    {
++        idle_tick_count = 0;
++    }
++    else if (idle_tick_count < 100)
++    {
++        idle_tick_count++;
++    }
++
++    if (cmd_running || (!idle_ && idle_tick_count < 50))
+     {
+         if (idle_)
+         {
